@@ -12,6 +12,10 @@ class AddressWithChecklist {
     this.items = const [],
   });
 
+  /// Identifies this merged entry. Shared with the address and its checklist,
+  /// which are both keyed by the address id.
+  String get id => address.id;
+
   AddressWithChecklist copyWith({
     AddressModel? address,
     List<ChecklistItem>? items,

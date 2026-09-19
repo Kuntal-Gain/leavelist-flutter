@@ -57,19 +57,22 @@ class ChecklistItemAdapter extends TypeAdapter<ChecklistItem> {
       id: fields[0] as String,
       label: fields[1] as String,
       type: fields[2] as ItemType,
+      isDone: fields[3] == null ? false : fields[3] as bool,
     );
   }
 
   @override
   void write(BinaryWriter writer, ChecklistItem obj) {
     writer
-      ..writeByte(3)
+      ..writeByte(4)
       ..writeByte(0)
       ..write(obj.id)
       ..writeByte(1)
       ..write(obj.label)
       ..writeByte(2)
-      ..write(obj.type);
+      ..write(obj.type)
+      ..writeByte(3)
+      ..write(obj.isDone);
   }
 
   @override

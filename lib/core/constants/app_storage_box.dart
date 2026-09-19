@@ -3,4 +3,5 @@ class AppStorageBox {
 
   static const String addresses = 'addresses';
   static const String checklists = 'checklists';
+  static const String dailyTodos = 'daily_todos';
 }

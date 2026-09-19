@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:leavelist/core/exports/app_exports.dart';
 import 'package:leavelist/features/home/ui/address_screen.dart';
 import 'package:leavelist/features/home/ui/home_map_view.dart';
+import 'package:leavelist/features/settings/ui/settings_screen.dart';
 import 'package:leavelist/shared/widgets/custom_appbar.dart';
 import 'package:leavelist/shared/widgets/custom_bottom_navbar.dart';
 import 'package:leavelist/shared/wrapper/screen_wrapper.dart';
@@ -32,7 +33,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final screens = [
       const HomeMapView(),
       AddressScreen(onAddAddress: () => setState(() => _currentIndex = 0)),
-      const Center(child: Text("Settings")),
+      const SettingsScreen(),
     ];
 
     return AppScreen(

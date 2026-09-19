@@ -34,13 +34,7 @@ class MapPinWidget extends StatelessWidget {
                   color: color,
                   shape: BoxShape.circle,
                   border: Border.all(color: AppColors.white, width: 3),
-                  boxShadow: [
-                    BoxShadow(
-                      color: color.withValues(alpha: 0.4),
-                      blurRadius: 10,
-                      spreadRadius: 1,
-                    ),
-                  ],
+                  
                 ),
                 child: Center(
                   child: Icon(icon, color: AppColors.white, size: 16),

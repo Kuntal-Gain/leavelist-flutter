@@ -1,16 +1,25 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:leavelist/core/exports/app_exports.dart';
 import 'package:leavelist/core/utils/widget_to_bitmap.dart';
 import 'package:leavelist/features/home/models/map_pin.dart';
+import 'package:leavelist/features/home/models/checklist_item.dart';
+import 'package:leavelist/features/home/provider/daily_todo_provider.dart';
 import 'package:leavelist/features/home/provider/home_provider.dart';
 import 'package:leavelist/features/home/provider/todo_provider.dart';
 import 'package:leavelist/shared/widgets/map_pin_widget.dart';
 
 import '../../../shared/widgets/configure_location_sheet.dart';
 
-const _initialCameraPosition = LatLng(22.5726, 88.3639);
+// Fallback used only when the device location is unavailable.
+const _fallbackCameraPosition = LatLng(22.5726, 88.3639);
+
+/// Distance from a pin within which the user counts as "at" that address.
+const _arrivalRadiusMeters = 1.0;
 
 class HomeMapView extends ConsumerStatefulWidget {
   const HomeMapView({super.key});
@@ -22,12 +31,128 @@ class HomeMapView extends ConsumerStatefulWidget {
 class _HomeMapViewState extends ConsumerState<HomeMapView> {
   GoogleMapController? _mapController;
   final Set<Marker> _markers = {};
-  LatLng _currentCameraPosition = _initialCameraPosition;
+  LatLng _currentCameraPosition = _fallbackCameraPosition;
+
+  StreamSubscription<Position>? _positionSub;
+  Position? _lastPosition;
+
+  /// Pins the user is currently within [_arrivalRadiusMeters] of.
+  final Set<String> _insidePinIds = {};
+
+  /// Pins whose daily todo has been requested from storage.
+  final Set<String> _loadedPinIds = {};
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) => _buildMarkers());
+    _moveToCurrentLocation();
+  }
+
+  @override
+  void dispose() {
+    _positionSub?.cancel();
+    super.dispose();
+  }
+
+  /// Compares the user's position with every pin, reacting to entering or
+  /// leaving the arrival radius.
+  void _evaluateProximity() {
+    final position = _lastPosition;
+    if (position == null || !mounted) return;
+
+    final pins = ref.read(homeProvider).pins;
+    final home = ref.read(homeProvider.notifier);
+
+    var changed = false;
+
+    for (final pin in pins) {
+      // Today's items are needed for every pin so the warning can list them.
+      if (_loadedPinIds.add(pin.id)) {
+        ref.read(dailyTodoProvider.notifier).load(pin.id);
+      }
+
+      final distance = Geolocator.distanceBetween(
+        position.latitude,
+        position.longitude,
+        pin.position.latitude,
+        pin.position.longitude,
+      );
+      debugPrint('[HomeMap] ${pin.title}: ${distance.toStringAsFixed(1)} m away');
+      final inside = distance <= _arrivalRadiusMeters;
+      final wasInside = _insidePinIds.contains(pin.id);
+
+      if (inside && !wasInside) {
+        _insidePinIds.add(pin.id);
+        home.selectPin(pin.id);
+        changed = true;
+      } else if (!inside && wasInside) {
+        _insidePinIds.remove(pin.id);
+        changed = true;
+
+        // Close the panel: either everything is checked (nothing to show) or
+        // the "you forgot your things" warning takes its place.
+        if (ref.read(homeProvider).selectedPinId == pin.id) {
+          home.selectPin(null);
+        }
+      }
+    }
+
+    if (changed) {
+      setState(() {});
+      _buildMarkers();
+    }
+  }
+
+  /// Re-reads today's items and the current position, then re-checks
+  /// proximity. Backs the warning's Refresh button.
+  Future<void> _refresh() async {
+    try {
+      _lastPosition = await Geolocator.getCurrentPosition();
+    } catch (e) {
+      debugPrint('[HomeMap] refresh failed to get position: $e');
+    }
+    _loadedPinIds.clear();
+    _evaluateProximity();
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _moveToCurrentLocation() async {
+    try {
+      if (!await Geolocator.isLocationServiceEnabled()) return;
+
+      var permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+      }
+      if (permission == LocationPermission.denied ||
+          permission == LocationPermission.deniedForever) {
+        return;
+      }
+
+      final position = await Geolocator.getCurrentPosition();
+      final target = LatLng(position.latitude, position.longitude);
+      _currentCameraPosition = target;
+      _lastPosition = position;
+      if (!mounted) return;
+      debugPrint('[HomeMap] initial position ${position.latitude}, ${position.longitude}');
+      _evaluateProximity();
+
+      _positionSub = Geolocator.getPositionStream(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.high,
+          distanceFilter: 5,
+        ),
+      ).listen((position) {
+        _lastPosition = position;
+        _evaluateProximity();
+      });
+
+      await _mapController?.animateCamera(CameraUpdate.newLatLng(target));
+    } catch (e) {
+      // Keep the fallback position if location can't be determined.
+      debugPrint('[HomeMap] location setup failed: $e');
+    }
   }
 
   Future<void> _buildMarkers() async {
@@ -85,7 +210,10 @@ class _HomeMapViewState extends ConsumerState<HomeMapView> {
 
   @override
   Widget build(BuildContext context) {
-    ref.listen(homeProvider.select((s) => s.pins), (_, __) => _buildMarkers());
+    ref.listen(homeProvider.select((s) => s.pins), (_, __) {
+      _buildMarkers();
+      _evaluateProximity();
+    });
 
     final selectedPinId = ref.watch(homeProvider.select((s) => s.selectedPinId));
     final pins = ref.watch(homeProvider.select((s) => s.pins));
@@ -96,6 +224,32 @@ class _HomeMapViewState extends ConsumerState<HomeMapView> {
         break;
       }
     }
+
+    // A tapped pin wins; otherwise the panel opens by itself for a pin the
+    // user is standing at, whether or not they tapped anything.
+    MapPin? panelPin = selectedPin;
+    if (panelPin == null) {
+      for (final p in pins) {
+        if (_insidePinIds.contains(p.id)) {
+          panelPin = p;
+          break;
+        }
+      }
+    }
+
+    // Nothing configured for this address: don't show the panel at all.
+    final todos = ref.watch(todoProvider);
+    final hasChecklist =
+        panelPin != null && todos.itemsFor(panelPin.id).isNotEmpty;
+
+    // Unchecked items of addresses the user walked away from.
+    final dailyTodos = ref.watch(dailyTodoProvider);
+    final forgottenItems = <ChecklistItem>[
+      if (_lastPosition != null)
+        for (final p in pins)
+          if (!_insidePinIds.contains(p.id))
+            ...dailyTodos.itemsFor(p.id).where((item) => !item.isDone),
+    ];
 
     return Scaffold(
       floatingActionButton: FloatingActionButton.extended(
@@ -109,24 +263,38 @@ class _HomeMapViewState extends ConsumerState<HomeMapView> {
         children: [
           GoogleMap(
             initialCameraPosition: CameraPosition(
-              target: _initialCameraPosition,
+              target: _currentCameraPosition,
               zoom: 14,
             ),
-            onMapCreated: (controller) => _mapController = controller,
+            onMapCreated: (controller) {
+              _mapController = controller;
+              controller.animateCamera(CameraUpdate.newLatLng(_currentCameraPosition));
+            },
+            myLocationEnabled: true,
             onCameraMove: (position) => _currentCameraPosition = position.target,
             markers: _markers,
             myLocationButtonEnabled: false,
             zoomControlsEnabled: false,
             mapToolbarEnabled: false,
           ),
-          if (selectedPin != null)
+          if (panelPin != null && hasChecklist)
             Positioned(
               left: 0,
               right: 0,
               bottom: 68,
               child: _SelectedAddressPanel(
-                key: ValueKey(selectedPin.id),
-                pin: selectedPin,
+                key: ValueKey(panelPin.id),
+                pin: panelPin,
+              ),
+            )
+          else if (forgottenItems.isNotEmpty)
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 68,
+              child: _ForgotItemsWarning(
+                items: forgottenItems,
+                onRefresh: _refresh,
               ),
             ),
         ],
@@ -145,12 +313,16 @@ class _SelectedAddressPanel extends ConsumerStatefulWidget {
 }
 
 class _SelectedAddressPanelState extends ConsumerState<_SelectedAddressPanel> {
-  final Set<String> _checkedIds = {};
+  @override
+  void initState() {
+    super.initState();
+    Future.microtask(() => ref.read(dailyTodoProvider.notifier).load(widget.pin.id));
+  }
 
   @override
   Widget build(BuildContext context) {
-    final items = ref.watch(todoProvider).itemsFor(widget.pin.id);
-    final checkedCount = items.where((item) => _checkedIds.contains(item.id)).length;
+    final items = ref.watch(dailyTodoProvider).itemsFor(widget.pin.id);
+    final checkedCount = items.where((item) => item.isDone).length;
     final allChecked = items.isNotEmpty && checkedCount == items.length;
     final progress = items.isEmpty ? 0.0 : checkedCount / items.length;
 
@@ -300,25 +472,21 @@ class _SelectedAddressPanelState extends ConsumerState<_SelectedAddressPanel> {
                         padding: EdgeInsets.all(AppSizes.xlp),
                         child: const _AllDoneCard(),
                       )
-                    : Flexible(
+                    : ListView.separated(
                         key: const ValueKey('list'),
-                        child: ListView.separated(
-                          shrinkWrap: true,
-                          padding: EdgeInsets.symmetric(horizontal: AppSizes.xlp, vertical: AppSizes.mp),
-                          itemCount: items.length,
-                          separatorBuilder: (_, __) => Divider(color: AppColors.divider, height: AppSizes.xlp),
-                          itemBuilder: (context, index) {
+                        shrinkWrap: true,
+                        padding: EdgeInsets.symmetric(horizontal: AppSizes.xlp, vertical: AppSizes.mp),
+                        itemCount: items.length,
+                        separatorBuilder: (_, __) => Divider(color: AppColors.divider, height: AppSizes.xlp),
+                        itemBuilder: (context, index) {
                             final item = items[index];
-                            final checked = _checkedIds.contains(item.id);
+                            final checked = item.isDone;
+                            void toggle() => ref
+                                .read(dailyTodoProvider.notifier)
+                                .toggleItem(widget.pin.id, item.id);
                             return InkWell(
                               borderRadius: BorderRadius.circular(AppSizes.r8),
-                              onTap: () => setState(() {
-                                if (checked) {
-                                  _checkedIds.remove(item.id);
-                                } else {
-                                  _checkedIds.add(item.id);
-                                }
-                              }),
+                              onTap: toggle,
                               child: Row(
                                 children: [
                                   Container(
@@ -342,13 +510,7 @@ class _SelectedAddressPanelState extends ConsumerState<_SelectedAddressPanel> {
                                   SizedBox(width: AppSizes.mp),
                                   Checkbox(
                                     value: checked,
-                                    onChanged: (value) => setState(() {
-                                      if (value ?? false) {
-                                        _checkedIds.add(item.id);
-                                      } else {
-                                        _checkedIds.remove(item.id);
-                                      }
-                                    }),
+                                    onChanged: (_) => toggle(),
                                     activeColor: AppColors.primary,
                                     shape: RoundedRectangleBorder(
                                       borderRadius: BorderRadius.circular(AppSizes.r4),
@@ -359,10 +521,199 @@ class _SelectedAddressPanelState extends ConsumerState<_SelectedAddressPanel> {
                             );
                           },
                         ),
-                      ),
           ),
           SizedBox(height: AppSizes.mp),
         ],
+      ),
+    );
+  }
+}
+
+/// Shown while the user is away from an address with unchecked items.
+/// Item icons sit as overlapping translucent tiles when several things were
+/// forgotten.
+class _ForgotItemsWarning extends StatefulWidget {
+  const _ForgotItemsWarning({required this.items, required this.onRefresh});
+
+  final List<ChecklistItem> items;
+  final Future<void> Function() onRefresh;
+
+  @override
+  State<_ForgotItemsWarning> createState() => _ForgotItemsWarningState();
+}
+
+class _ForgotItemsWarningState extends State<_ForgotItemsWarning> {
+  bool _refreshing = false;
+  double _turns = 0;
+
+  Future<void> _handleRefresh() async {
+    if (_refreshing) return;
+    setState(() {
+      _refreshing = true;
+      _turns += 1;
+    });
+    await widget.onRefresh();
+    if (mounted) setState(() => _refreshing = false);
+  }
+
+  /// "Laptop", "Laptop and Keys", "Laptop, Keys and Bag".
+  String _namesOf(List<ChecklistItem> items) {
+    final names = items.map((i) => i.label).toSet().toList();
+    if (names.length <= 1) return names.join();
+    return '${names.sublist(0, names.length - 1).join(', ')} and ${names.last}';
+  }
+
+  static const _maxStacked = 4;
+  static const _tileSize = 64.0;
+  static const _step = _tileSize * 0.58;
+
+  // Alternating tilt and lift so the tiles fan out like a hand of cards.
+  static const _tilts = [-0.10, 0.06, -0.04, 0.09, -0.07];
+
+  @override
+  Widget build(BuildContext context) {
+    final items = widget.items;
+    final shown = items.take(_maxStacked).toList();
+    final extra = items.length - shown.length;
+    final tileCount = shown.length + (extra > 0 ? 1 : 0);
+    final stackWidth = _step * (tileCount - 1) + _tileSize;
+
+    return Container(
+      margin: EdgeInsets.fromLTRB(AppSizes.xlp, 0, AppSizes.xlp, AppSizes.xlp),
+      padding: EdgeInsets.all(AppSizes.xlp),
+      decoration: BoxDecoration(
+        color: AppColors.white,
+        borderRadius: BorderRadius.circular(AppSizes.r16 + AppSizes.s8),
+        boxShadow: [BoxShadow(color: AppColors.shadow, blurRadius: 20, offset: Offset(0, 8))],
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          SizedBox(height: AppSizes.mp),
+          SizedBox(
+            height: _tileSize + 12,
+            width: stackWidth,
+            child: Stack(
+              children: [
+                for (var i = 0; i < shown.length; i++)
+                  Positioned(
+                    left: i * _step,
+                    top: i.isEven ? 0 : 10,
+                    child: _tile(
+                      tilt: _tilts[i],
+                      color: shown[i].type.color,
+                      child: Icon(shown[i].type.icon, size: 30, color: AppColors.white),
+                    ),
+                  ),
+                if (extra > 0)
+                  Positioned(
+                    left: shown.length * _step,
+                    top: shown.length.isEven ? 0 : 10,
+                    child: _tile(
+                      tilt: _tilts[shown.length % _tilts.length],
+                      color: AppColors.textTertiary,
+                      child: Text(
+                        '+$extra',
+                        style: AppTypography.titleMedium.copyWith(color: AppColors.white),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          SizedBox(height: AppSizes.xlp),
+          Text(
+            'Wait, you forgot something!',
+            textAlign: TextAlign.center,
+            style: AppTypography.titleLarge.copyWith(
+              color: AppColors.primary,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+          SizedBox(height: AppSizes.s8),
+          Text(
+            '${_namesOf(items)} ${items.length == 1 ? 'is' : 'are'} still '
+            'not checked. Please go back and bring '
+            '${items.length == 1 ? 'it' : 'them'} with you.',
+            textAlign: TextAlign.center,
+            style: AppTypography.bodyMedium.copyWith(
+              color: AppColors.textSecondary,
+              height: 1.4,
+            ),
+          ),
+          SizedBox(height: AppSizes.xlp + AppSizes.s4),
+          _refreshButton(),
+        ],
+      ),
+    );
+  }
+
+  /// Flat orange CTA; the icon spins while the check runs.
+  Widget _refreshButton() {
+    return Material(
+      color: AppColors.transparent,
+      child: Ink(
+        decoration: BoxDecoration(
+          color: AppColors.primary,
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(8),
+          onTap: _refreshing ? null : _handleRefresh,
+          child: Padding(
+            padding: EdgeInsets.symmetric(vertical: AppSizes.mp + AppSizes.s4),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                AnimatedRotation(
+                  turns: _turns,
+                  duration: const Duration(milliseconds: 600),
+                  curve: Curves.easeInOut,
+                  child: const Icon(Icons.refresh_rounded, size: 22, color: AppColors.white),
+                ),
+                SizedBox(width: AppSizes.s8),
+                Text(
+                  _refreshing ? 'Checking...' : "I've got them, check again",
+                  style: AppTypography.button.copyWith(color: AppColors.white),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// One card in the stack: solid colour, white rim and a shadow so each
+  /// tile visibly sits above the previous one.
+  Widget _tile({
+    required Color color,
+    required Widget child,
+    required double tilt,
+  }) {
+    return Transform.rotate(
+      angle: tilt,
+      child: Container(
+        width: _tileSize,
+        height: _tileSize,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [color.withValues(alpha: 0.75), color],
+          ),
+          borderRadius: BorderRadius.circular(22),
+          border: Border.all(color: AppColors.white, width: 3),
+          boxShadow: [
+            BoxShadow(
+              color: color.withValues(alpha: 0.35),
+              blurRadius: 12,
+              offset: const Offset(-4, 6),
+            ),
+          ],
+        ),
+        child: child,
       ),
     );
   }

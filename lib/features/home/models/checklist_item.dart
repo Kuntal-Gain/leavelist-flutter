@@ -98,9 +98,24 @@ class ChecklistItem {
   @HiveField(2)
   final ItemType type;
 
+  /// Completion state. Only meaningful for a day's snapshot
+  /// (see `DailyTodoModel`); the base checklist keeps it `false`.
+  @HiveField(3, defaultValue: false)
+  final bool isDone;
+
   const ChecklistItem({
     required this.id,
     required this.label,
     required this.type,
+    this.isDone = false,
   });
+
+  ChecklistItem copyWith({bool? isDone}) {
+    return ChecklistItem(
+      id: id,
+      label: label,
+      type: type,
+      isDone: isDone ?? this.isDone,
+    );
+  }
 }

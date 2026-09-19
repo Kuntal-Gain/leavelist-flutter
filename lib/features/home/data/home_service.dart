@@ -1,5 +1,6 @@
 import 'package:leavelist/features/home/models/address_model.dart';
 import 'package:leavelist/features/home/models/checklist_item.dart';
+import 'package:leavelist/features/home/models/daily_todo_model.dart';
 
 abstract class HomeService {
 
@@ -31,4 +32,15 @@ abstract class HomeService {
   /// Delete Todo List for a specific Address
   Future<void> deleteTodoList(String addrId);
 
+  /// Get daily todo for a current date
+  Future<DailyTodoModel> getDailyTodo(String addrId);
+
+  /// Save daily todo for a current date
+  Future<void> saveDailyTodo(DailyTodoModel dailyTodo);
+
+  /// Update daily todo for a current date
+  Future<void> updateDailyTodo(DailyTodoModel dailyTodo);
+
+  /// Delete daily todo for a current date
+  Future<void> deleteDailyTodo(String addrId);
 }

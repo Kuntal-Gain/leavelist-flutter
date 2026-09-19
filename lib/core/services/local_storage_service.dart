@@ -1,6 +1,7 @@
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:leavelist/features/home/models/address_model.dart';
 import 'package:leavelist/features/home/models/checklist_item.dart';
+import 'package:leavelist/features/home/models/daily_todo_model.dart';
 import 'package:leavelist/core/constants/app_storage_box.dart';
 
 /// Thin wrapper around Hive setup — initialization, adapter registration,
@@ -62,10 +63,16 @@ static Future<void> init() async {
     Hive.registerAdapter<ChecklistItem>(ChecklistItemAdapter());
   }
 
+  if (!Hive.isAdapterRegistered(5)) {
+    Hive.registerAdapter<DailyTodoModel>(DailyTodoModelAdapter());
+  }
+
   _openBoxes[AppStorageBox.addresses] =
       await Hive.openBox<AddressModel>(AppStorageBox.addresses);
   _openBoxes[AppStorageBox.checklists] =
       await Hive.openBox<CheckList>(AppStorageBox.checklists);
+  _openBoxes[AppStorageBox.dailyTodos] =
+      await Hive.openBox<DailyTodoModel>(AppStorageBox.dailyTodos);
 
   _initialized = true;
 }
